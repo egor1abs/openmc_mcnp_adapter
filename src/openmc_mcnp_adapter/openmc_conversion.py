@@ -15,6 +15,7 @@ from openmc.model.surface_composite import (
     RectangularParallelepiped as RPP
 )
 from openmc.model import surface_composite
+from openmc_mcnp_adapter import  surfaces_comparison
 
 from .parse import parse, _COMPLEMENT_RE, _CELL_FILL_RE
 
@@ -79,7 +80,15 @@ def get_openmc_materials(materials, cells):
         else:
             material = openmc.Material(m['id'])
             material.name = f'M{mcnp_mat_id} with density {density}'
+            norm_factor = sum([abs(percent) for _, percent in m['nuclides']])
+            nuclide_percent = {}
             for nuclide, percent in m['nuclides']:
+                if nuclide not in nuclide_percent.keys():
+                    nuclide_percent[nuclide] = percent/norm_factor
+                else:
+                    nuclide_percent[nuclide] += percent/norm_factor
+
+            for nuclide, percent in nuclide_percent.items():
                 if '.' in nuclide:
                     zaid, xs = nuclide.split('.')
                 else:
@@ -171,11 +180,11 @@ def get_openmc_surfaces(surfaces, data):
                 A, B, C, D = coeffs
                 surf = openmc.Plane(surface_id=s['id'], a=A, b=B, c=C, d=D)
         elif s['mnemonic'] == 'px':
-            surf = openmc.XPlane(surface_id=s['id'], x0=coeffs[0])
+            surf = openmc.Plane(a=1, b=0, c=0, d=coeffs[0], surface_id=s['id'])
         elif s['mnemonic'] == 'py':
-            surf = openmc.YPlane(surface_id=s['id'], y0=coeffs[0])
+            surf = openmc.Plane(a=0, b=1, c=0, d=coeffs[0], surface_id=s['id'])
         elif s['mnemonic'] == 'pz':
-            surf = openmc.ZPlane(surface_id=s['id'], z0=coeffs[0])
+            surf = openmc.Plane(a=0, b=0, c=1, d=coeffs[0], surface_id=s['id'])
         elif s['mnemonic'] == 'so':
             surf = openmc.Sphere(surface_id=s['id'], r=coeffs[0])
         elif s['mnemonic'] == 's':
@@ -273,7 +282,7 @@ def get_openmc_surfaces(surfaces, data):
                     # decide if we want the up or down part of the
                     # cone since one sheet is used
                     up = grad >= 0
-                    surf = cls_cone(z0=offset, r2=angle, up=up)
+                    surf = cls_cone(**{f"{s['mnemonic']}0": offset, "r2": angle, "up": up})
             else:
                 raise NotImplementedError(f"{s['mnemonic']} surface with {len(coeffs)} parameters")
         elif s['mnemonic'] == 'rcc':
@@ -318,12 +327,91 @@ def get_openmc_surfaces(surfaces, data):
 
         # For macrobodies, we also need to add generated surfaces to dictionary
         if isinstance(surf, surface_composite.CompositeSurface):
-            openmc_surfaces.update((-surf).get_surfaces())
+            surfaces_macrobodies = (-surf).get_surfaces()
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", openmc.IDWarning)
+                for i, s in surfaces_macrobodies.items():
+                    if s.type == 'x-plane':
+                        s = openmc.Plane(a=1, b=0, c=0, d=s.x0, surface_id=s.id)
+                    if s.type == 'y-plane':
+                        s = openmc.Plane(a=0, b=1, c=0, d=s.y0, surface_id=s.id) 
+                    if s.type == 'z-plane':
+                        s = openmc.Plane(a=0, b=0, c=1, d=s.z0, surface_id=s.id) 
+                    openmc_surfaces[i] = s
 
     return openmc_surfaces
 
+def get_surfaces_to_be_compared(surfaces):
 
-def get_openmc_universes(cells, surfaces, materials, data):
+    surfaces_openmc_comparison = {}
+    for i, surface in surfaces.items():
+        if isinstance(surface, surface_composite.CompositeSurface):
+            continue
+        if surface.boundary_type == 'transmission':
+            surf_type = surface.type.replace('x-plane', 'plane').replace('y-plane', 'plane').replace('z-plane', 'plane')
+            if surf_type in surfaces_openmc_comparison.keys():
+                surfaces_openmc_comparison[surf_type] += [surface]
+            else:
+                surfaces_openmc_comparison[surf_type] = [surface]
+    
+    return surfaces_openmc_comparison
+
+def compare_surfaces(surfaces):
+
+    surfaces_openmc_comparison = get_surfaces_to_be_compared(surfaces)
+    surfaces_planes = {}
+    surfaces_others = {}
+    
+    for tipo, surfs in surfaces_openmc_comparison.items():
+        if tipo == 'plane':
+            for surf in surfs:
+                surfaces_planes[surf.id] = {'id':surf.id, 'kind': 'plane', 'coefficients': list(surf.coefficients.values())}
+        else:
+            for surf in surfs:
+                surfaces_others[surf.id] = {'id':surf.id, 'kind': tipo, 'coefficients': list(surf.coefficients.values())}
+    
+    
+    
+    identical_surfaces_planes = surfaces_comparison.compare(surfaces_planes, "Dynamic") 
+    identical_surfaces_others = surfaces_comparison.compare(surfaces_others, "Dynamic") 
+
+
+    identical_surfaces_temporary = identical_surfaces_planes | identical_surfaces_others
+
+    
+    identical_surfaces = {}
+    for k, v in identical_surfaces_temporary.items():
+        identical_surfaces[str(k)] = int((v/abs(v))*identical_surfaces.get(str(abs(v)), abs(v)))
+        if int(k) in identical_surfaces.values() or int(-1*int(k)) in identical_surfaces.values():
+            for k2, v2 in identical_surfaces.items():
+                if abs(int(v2)) == abs(int(k)):
+                    identical_surfaces[str(k2)] = int((v2/abs(v2))*v)
+    return identical_surfaces
+
+def reduce_general_plane_to_xyz(surfaces):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", openmc.IDWarning)
+        new_surfaces = {}
+        for k, surf in surfaces.items():
+            if isinstance(surf, surface_composite.CompositeSurface):
+                new_surfaces[k] = surf
+            else:
+                if surf.type == 'plane':
+                    coeff = surf.coefficients
+                    if coeff['a']==1 and coeff['b']==0 and coeff['c']==0:
+                        s = openmc.XPlane(x0=coeff['d'], surface_id=surf.id, boundary_type=surf.boundary_type)
+                    elif coeff['a']==0 and coeff['b']==1 and coeff['c']==0:
+                        s = openmc.YPlane(y0=coeff['d'], surface_id=surf.id, boundary_type=surf.boundary_type)
+                    elif coeff['a']==0 and coeff['b']==0 and coeff['c']==1:
+                        s = openmc.ZPlane(z0=coeff['d'], surface_id=surf.id, boundary_type=surf.boundary_type)
+                    else:
+                        s = surf
+                    new_surfaces[k] = s
+                else:
+                    new_surfaces[k] = surf
+    return new_surfaces
+
+def get_openmc_universes(cells, surfaces, materials, data, compare_remove_surfaces=True):
     """Get OpenMC surfaces from MCNP surfaces
 
     Parameters
@@ -420,7 +508,17 @@ def get_openmc_universes(cells, surfaces, materials, data):
             for surf_id, surf in c['_region'].get_surfaces().items():
                 surfaces[surf_id] = surf
                 if isinstance(surf, surface_composite.CompositeSurface):
-                    surfaces.update((-surf).get_surfaces())
+                    surfaces_macrobodies = (-surf).get_surfaces()
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", openmc.IDWarning)
+                        for i, s in surfaces_macrobodies.items():
+                            if s.type == 'x-plane':
+                                s = openmc.Plane(a=1, b=0, c=0, d=s.x0, surface_id=s.id)
+                            if s.type == 'y-plane':
+                                s = openmc.Plane(a=0, b=1, c=0, d=s.y0, surface_id=s.id) 
+                            if s.type == 'z-plane':
+                                s = openmc.Plane(a=0, b=0, c=1, d=s.z0, surface_id=s.id) 
+                            surfaces[i] = s
 
     has_cell_complement_ordered = []
     def add_to_ordered(c):
@@ -466,11 +564,28 @@ def get_openmc_universes(cells, surfaces, materials, data):
 
     # Now that all cell regions have been converted, the next loop is to create
     # actual Cell/Universe/Lattice objects
+    if compare_remove_surfaces:
+        identical_surfaces = compare_surfaces(surfaces)
+        #import json
+        #with open('dictionary_surface_replaced.json', 'w') as fp:
+        #    json.dump(identical_surfaces, fp)
+
+    surfaces = reduce_general_plane_to_xyz(surfaces)
+    
     for c in cells:
         cell = openmc.Cell(cell_id=c['id'])
 
         # Assign region to cell based on expression
-        cell.region = c['_region']
+        if compare_remove_surfaces:
+            cell_surfaces = c['_region'].get_surfaces().keys()
+            region_definition = ' ' + str(c['_region']).replace('(', ' ( ').replace(')', ' ) ').replace('+', ' ') + ' '
+            to_be_replaced = [str(int(surf)) for surf in cell_surfaces if str(surf) in identical_surfaces.keys()]
+            for surf_id in to_be_replaced:
+                surf_new = int(identical_surfaces[surf_id])
+                region_definition = region_definition.replace(f' -{surf_id} ', f' {int(-1*surf_new)} ').replace(f' {surf_id} ',f' {surf_new} ')
+            cell.region = openmc.Region.from_expression(region_definition, surfaces)
+        else:
+            cell.region = openmc.Region.from_expression(str(c['_region']), surfaces)
 
         # Add cell to universes if necessary
         if 'u' in c['parameters']:
@@ -487,13 +602,13 @@ def get_openmc_universes(cells, surfaces, materials, data):
         # Look for vacuum boundary condition
         if isinstance(cell.region, openmc.Union):
             if all([isinstance(n, openmc.Halfspace) for n in cell.region]):
-                if 'imp:n' in c['parameters'] and c['parameters']['imp:n'] == '0':
+                if 'imp:n' in c['parameters'] and f"{float(c['parameters']['imp:n']):.5f}" == f"{0:.5f}":
                     for n in cell.region:
                         if n.surface.boundary_type == 'transmission':
                             n.surface.boundary_type = 'vacuum'
                     root_universe.remove_cell(cell)
         elif isinstance(cell.region, openmc.Halfspace):
-            if 'imp:n' in c['parameters'] and c['parameters']['imp:n'] == '0':
+            if 'imp:n' in c['parameters'] and f"{float(c['parameters']['imp:n']):.5f}" == f"{0:.5f}":
                 if cell.region.surface.boundary_type == 'transmission':
                     cell.region.surface.boundary_type = 'vacuum'
                 root_universe.remove_cell(cell)
@@ -705,7 +820,7 @@ def get_openmc_universes(cells, surfaces, materials, data):
     return universes
 
 
-def mcnp_to_model(filename):
+def mcnp_to_model(filename, compare_remove_surfaces=True):
     """Convert MCNP input to OpenMC model
 
     Parameters
@@ -724,7 +839,7 @@ def mcnp_to_model(filename):
     openmc_materials = get_openmc_materials(data['materials'], cells)
     openmc_surfaces = get_openmc_surfaces(surfaces, data)
     openmc_universes = get_openmc_universes(cells, openmc_surfaces,
-                                            openmc_materials, data)
+                                            openmc_materials, data, compare_remove_surfaces)
 
     geometry = openmc.Geometry(openmc_universes[0])
     materials = openmc.Materials(geometry.get_all_materials().values())
@@ -740,9 +855,9 @@ def mcnp_to_model(filename):
                                 geometry.root_universe.cells.values()])
     ll, ur = all_volume.bounding_box
     if np.any(np.isinf(ll)) or np.any(np.isinf(ur)):
-        settings.source = openmc.Source(space=openmc.stats.Point())
+        settings.source = openmc.IndependentSource(space=openmc.stats.Point())
     else:
-        settings.source = openmc.Source(space=openmc.stats.Point((ll + ur)/2))
+        settings.source = openmc.IndependentSource(space=openmc.stats.Point((ll + ur)/2))
 
     return openmc.Model(geometry, materials, settings)
 
@@ -751,7 +866,12 @@ def mcnp_to_openmc():
     """Command-line interface for converting MCNP model"""
     parser = argparse.ArgumentParser()
     parser.add_argument('mcnp_filename')
+    parser.add_argument("--compare_surfaces", action="store_true", 
+                    help="compare and remove identical surfaces", required=False)
+    
+    parser.add_argument('--no-compare_surfaces', dest='compare_surfaces', action='store_false')
+    parser.set_defaults(compare_surfaces=False)
     args = parser.parse_args()
 
-    model = mcnp_to_model(args.mcnp_filename)
+    model = mcnp_to_model(args.mcnp_filename, args.compare_surfaces)
     model.export_to_xml()
