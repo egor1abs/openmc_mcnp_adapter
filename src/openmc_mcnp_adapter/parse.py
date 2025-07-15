@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2022 UChicago Argonne, LLC
+# SPDX-FileCopyrightText: 2022-2025 UChicago Argonne, LLC and contributors
 # SPDX-License-Identifier: MIT
 
 from collections import defaultdict
@@ -13,6 +13,7 @@ _KEYWORDS = [
     r'\*?trcl', r'\*?fill', 'tmp', 'u', 'lat',
     'imp:.', 'vol', 'pwt', 'ext:.', 'fcl', 'wwn', 'dxc', 'nonu', 'pd',
     'elpt', 'cosy', 'bflcl', 'unc',
+    'pmt'  # D1SUNED-specific
 ]
 _ANY_KEYWORD = '|'.join(f'(?:{k})' for k in _KEYWORDS)
 _CELL_PARAMETERS_RE = re.compile(rf"""
@@ -31,7 +32,7 @@ _MATERIAL_RE = re.compile(r'\s*[Mm](\d+)((?:\s+\S+)+)')
 _TR_RE = re.compile(r'\s*(\*)?[Tt][Rr](\d+)\s+(.*)')
 _SAB_RE = re.compile(r'\s*[Mm][Tt](\d+)((?:\s+\S+)+)')
 _MODE_RE = re.compile(r'\s*mode(?:\s+\S+)*')
-_COMPLEMENT_RE = re.compile(r'(#)(\d+)')
+_COMPLEMENT_RE = re.compile(r'(#)[ ]*(\d+)')
 _REPEAT_RE = re.compile(r'(\d+)\s+(\d+)[rR]')
 _NUM_RE = re.compile(r'(\d)([+-])(\d)')
 
@@ -96,6 +97,13 @@ def parse_cell(line):
             region = g[2].strip()
         else:
             words = g[2].split()
+            # MCNP allows the density and the start of the geometry
+            # specification to appear without a space inbetween if the geometry
+            # starts with '('. If this happens, move the end of the first word
+            # onto the second word to ensure the density is by itself
+            if (pos := words[0].find('(')) >= 0:
+                words[1] = words[0][pos:] + words[1]
+                words[0] = words[0][:pos]
             density = float_(words[0])
             region = ' '.join(words[1:])
         return {
@@ -236,6 +244,10 @@ def parse_data(section):
             else:
                 rotation = None
             data['tr'][tr_num] = (displacement, rotation)
+        else:
+            words = line.split()
+            if words:
+                data[words[0]] = words[1:]
 
     return data
 
@@ -261,7 +273,7 @@ def split_mcnp(filename):
     return re.split('\n[ \t]*\n', text)
 
 
-def sanitize(section):
+def sanitize(section: str) -> str:
     """Sanitize one section of an MCNP input
 
     This function will remove comments, join continuation lines into a single
@@ -279,8 +291,11 @@ def sanitize(section):
 
     """
 
+    # Replace tab characters
+    section = section.expandtabs()
+
     # Remove end-of-line comments
-    section = re.sub('\$.*$', '', section, flags=re.MULTILINE)
+    section = re.sub(r'\$.*$', '', section, flags=re.MULTILINE)
 
     # Remove comment cards
     section = re.sub('^[ \t]*?[cC].*?$\n?', '', section, flags=re.MULTILINE)
