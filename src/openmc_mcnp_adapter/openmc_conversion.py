@@ -112,65 +112,43 @@ def get_openmc_materials(materials):
     ----------
     materials : list
         List of MCNP material information
-    cells : list
-        List of MCNP cells
+
     Returns
     -------
     dict
-        Dictionary mapping MCNP material ID to dictionary using MCNP density as key and the corresponding :class:`openmc.Material` object as value.
+        Dictionary mapping material ID to :class:`openmc.Material`
 
     """
-    materials_densities = list(itertools.groupby(sorted(cells, key=lambda cell: cell['material']), lambda c: (c['material'], c['density'])))
-    materials_densities = sorted(list(set([md[0] for md in materials_densities])), key=lambda x: x[0])
-    openmc.Material.next_id = max([mat_id for mat_id, _ in materials_densities]) + 1
-
-
     openmc_materials = {}
-    for mcnp_mat_id, density in materials_densities:
-        if mcnp_mat_id == 0:
-            continue
-        m = materials[mcnp_mat_id]
+    for m in materials.values():
         if 'id' not in m:
             continue
-        if mcnp_mat_id in openmc_materials.keys():
-            material = openmc_materials[mcnp_mat_id][list(openmc_materials[mcnp_mat_id].keys())[0]].clone()
-            material.name = f'M{mcnp_mat_id} with density {density}'
-        else:
-            material = openmc.Material(m['id'])
-            material.name = f'M{mcnp_mat_id} with density {density}'
-            for nuclide, percent in m['nuclides']:
-                if '.' in nuclide:
-                    zaid, xs = nuclide.split('.')
+        material = openmc.Material(m['id'])
+        for nuclide, percent in m['nuclides']:
+            if '.' in nuclide:
+                zaid, xs = nuclide.split('.')
+            else:
+                zaid = nuclide
+            name, element, Z, A, metastable = get_metadata(int(zaid), 'mcnp')
+            if percent < 0:
+                if A > 0:
+                    material.add_nuclide(name, abs(percent), 'wo')
                 else:
-                    zaid = nuclide
-                name, element, Z, A, metastable = get_metadata(int(zaid), 'mcnp')
-                if percent < 0:
-                    if A > 0:
-                        material.add_nuclide(name, abs(percent), 'wo')
-                    else:
-                        material.add_element(element, abs(percent), 'wo')
+                    material.add_element(element, abs(percent), 'wo')
+            else:
+                if A > 0:
+                    material.add_nuclide(name, percent, 'ao')
                 else:
-                    if A > 0:
-                        material.add_nuclide(name, percent, 'ao')
-                    else:
-                        material.add_element(element, percent, 'ao')
+                    material.add_element(element, percent, 'ao')
 
-            if 'sab' in m:
-                for sab in m['sab']:
-                    if '.' in sab:
-                        name, xs = sab.split('.')
-                    else:
-                        name = sab
-                    material.add_s_alpha_beta(get_thermal_name(name))
-        if density > 0:
-            material.set_density('atom/b-cm', density)
-        else:
-            material.set_density('g/cm3', abs(density))
-        if mcnp_mat_id not in openmc_materials.keys():
-            openmc_materials[mcnp_mat_id]= {f'{density}': material}
-        else:
-            openmc_materials[mcnp_mat_id][f'{density}'] = material            
-        
+        if 'sab' in m:
+            for sab in m['sab']:
+                if '.' in sab:
+                    name, xs = sab.split('.')
+                else:
+                    name = sab
+                material.add_s_alpha_beta(get_thermal_name(name))
+        openmc_materials[m['id']] = material
 
     return openmc_materials
 
@@ -718,6 +696,15 @@ def get_openmc_universes(cells, surfaces, materials, data, compare_remove_surfac
 
     # Now that all cell regions have been converted, the next loop is to create
     # actual Cell/Universe/Lattice objects
+    
+    if compare_remove_surfaces:
+        identical_surfaces = compare_surfaces(surfaces)
+        #import json
+        #with open('dictionary_surface_replaced.json', 'w') as fp:
+        #    json.dump(identical_surfaces, fp)
+
+    surfaces = reduce_general_plane_to_xyz(surfaces)
+    
     material_clones = {}
     for c in cells:
         cell = openmc.Cell(cell_id=c['id'])
@@ -984,7 +971,7 @@ def get_openmc_universes(cells, surfaces, materials, data, compare_remove_surfac
     return universes
 
 
-def mcnp_to_model(filename, compare_remove_surfaces=True):
+def mcnp_to_model(filename, compare_remove_surfaces=True) -> openmc.Model:
     """Convert MCNP input to OpenMC model
 
     Parameters
@@ -1002,13 +989,14 @@ def mcnp_to_model(filename, compare_remove_surfaces=True):
     """
 
     cells, surfaces, data = parse(filename)
-    openmc_materials = get_openmc_materials(data['materials'], cells)
+
+    openmc_materials = get_openmc_materials(data['materials'])
     openmc_surfaces = get_openmc_surfaces(surfaces, data)
     openmc_universes = get_openmc_universes(cells, openmc_surfaces,
                                             openmc_materials, data, compare_remove_surfaces)
 
     geometry = openmc.Geometry(openmc_universes[0])
-    geometry.merge_surfaces = merge_surfaces
+#    geometry.merge_surfaces = compare_remove_surfaces
     materials = openmc.Materials(geometry.get_all_materials().values())
 
     settings = openmc.Settings()
@@ -1025,9 +1013,9 @@ def mcnp_to_model(filename, compare_remove_surfaces=True):
     if src_class is None:
         src_class = openmc.Source
     if np.any(np.isinf(ll)) or np.any(np.isinf(ur)):
-        settings.source = openmc.IndependentSource(space=openmc.stats.Point())
+        settings.source = src_class(space=openmc.stats.Point())
     else:
-        settings.source = openmc.IndependentSource(space=openmc.stats.Point((ll + ur)/2))
+        settings.source = src_class(space=openmc.stats.Point((ll + ur)/2))
 
     return openmc.Model(geometry, materials, settings)
 
@@ -1053,8 +1041,15 @@ def mcnp_to_openmc():
                     help="compare and remove identical surfaces", required=False)
     
     parser.add_argument('--no-compare_surfaces', dest='compare_surfaces', action='store_false')
+    parser.add_argument('-o', '--output', default='model.xml',
+                        help='Name for the OpenMC model XML file')
+    parser.add_argument('-s', '--separate-xml', action='store_true',
+                        help='Write separate XML files')
     parser.set_defaults(compare_surfaces=False)
     args = parser.parse_args()
 
     model = mcnp_to_model(args.mcnp_filename, args.compare_surfaces)
-    model.export_to_xml()
+    if args.separate_xml:
+        model.export_to_xml()
+    else:
+        model.export_to_model_xml(args.output)
