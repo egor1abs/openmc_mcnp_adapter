@@ -124,7 +124,16 @@ def get_openmc_materials(materials):
         if 'id' not in m:
             continue
         material = openmc.Material(m['id'])
+        norm_factor = sum([abs(percent) for _, percent in m['nuclides']])
+        nuclide_percent = {}
         for nuclide, percent in m['nuclides']:
+            if nuclide not in nuclide_percent.keys():
+                nuclide_percent[nuclide] = percent/norm_factor
+            else:
+                nuclide_percent[nuclide] += percent/norm_factor
+
+        for nuclide, percent in nuclide_percent.items():
+       # for nuclide, percent in m['nuclides']:
             if '.' in nuclide:
                 zaid, xs = nuclide.split('.')
             else:
@@ -759,6 +768,7 @@ def get_openmc_universes(cells, surfaces, materials, data, compare_remove_surfac
                 else:
                     mat.set_density('g/cm3', abs(cell_density))
             elif mat.density != abs(c['density']):
+                mat.name = f"M{cell_material_id} with density {cell_density}"
                 key = (cell_material_id, cell_density)
                 if key not in material_clones:
                     material_clones[key] = mat = mat.clone()

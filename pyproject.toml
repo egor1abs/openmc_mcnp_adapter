@@ -6,7 +6,7 @@ build-backend = "maturin"
 
 [project]
 name = "openmc_mcnp_adapter"
-version = "0.1.0"
+version = "0.2.1"
 description = "Tool to convert MCNP input file to OpenMC classes/XML"
 readme = "README.md"
 authors = [
