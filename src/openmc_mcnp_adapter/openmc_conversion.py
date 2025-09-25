@@ -230,11 +230,11 @@ def get_openmc_surfaces(surfaces, data):
                 A, B, C, D = coeffs
                 surf = openmc.Plane(surface_id=s['id'], a=A, b=B, c=C, d=D)
         elif s['mnemonic'] == 'px':
-            surf = openmc.XPlane(surface_id=s['id'], x0=coeffs[0])
+            surf = openmc.Plane(a=1, b=0, c=0, d=coeffs[0], surface_id=s['id'])
         elif s['mnemonic'] == 'py':
-            surf = openmc.YPlane(surface_id=s['id'], y0=coeffs[0])
+            surf = openmc.Plane(a=0, b=1, c=0, d=coeffs[0], surface_id=s['id'])
         elif s['mnemonic'] == 'pz':
-            surf = openmc.ZPlane(surface_id=s['id'], z0=coeffs[0])
+            surf = openmc.Plane(a=0, b=0, c=1, d=coeffs[0], surface_id=s['id'])
         elif s['mnemonic'] == 'so':
             surf = openmc.Sphere(surface_id=s['id'], r=coeffs[0])
         elif s['mnemonic'] in ('s', 'sph'):
@@ -414,7 +414,17 @@ def get_openmc_surfaces(surfaces, data):
 
         # For macrobodies, we also need to add generated surfaces to dictionary
         if isinstance(surf, surface_composite.CompositeSurface):
-            openmc_surfaces.update((-surf).get_surfaces())
+            surfaces_macrobodies = (-surf).get_surfaces()
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", openmc.IDWarning)
+                for i, s in surfaces_macrobodies.items():
+                    if s.type == 'x-plane':
+                        s = openmc.Plane(a=1, b=0, c=0, d=s.x0, surface_id=s.id)
+                    if s.type == 'y-plane':
+                        s = openmc.Plane(a=0, b=1, c=0, d=s.y0, surface_id=s.id) 
+                    if s.type == 'z-plane':
+                        s = openmc.Plane(a=0, b=0, c=1, d=s.z0, surface_id=s.id) 
+                    openmc_surfaces[i] = s
 
     # Make another pass to set periodic surfaces
     for s in surfaces:
@@ -511,7 +521,6 @@ def compare_surfaces(surfaces):
         else:
             for surf in surfs:
                 surfaces_others[surf.id] = {'id':surf.id, 'kind': tipo, 'coefficients': list(surf.coefficients.values())}
-    
     
     
     identical_surfaces_planes = surfaces_comparison.compare(surfaces_planes, "Dynamic") 
@@ -655,7 +664,17 @@ def get_openmc_universes(cells, surfaces, materials, data, compare_remove_surfac
             for surf_id, surf in c['_region'].get_surfaces().items():
                 surfaces[surf_id] = surf
                 if isinstance(surf, surface_composite.CompositeSurface):
-                    surfaces.update((-surf).get_surfaces())
+                    surfaces_macrobodies = (-surf).get_surfaces()
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", openmc.IDWarning)
+                        for i, s in surfaces_macrobodies.items():
+                            if s.type == 'x-plane':
+                                s = openmc.Plane(a=1, b=0, c=0, d=s.x0, surface_id=s.id)
+                            if s.type == 'y-plane':
+                                s = openmc.Plane(a=0, b=1, c=0, d=s.y0, surface_id=s.id) 
+                            if s.type == 'z-plane':
+                                s = openmc.Plane(a=0, b=0, c=1, d=s.z0, surface_id=s.id) 
+                            surfaces[i] = s
 
     has_cell_complement_ordered = []
     def add_to_ordered(c):

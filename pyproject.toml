@@ -16,7 +16,7 @@ license = "MIT"
 requires-python = ">=3.10"
 
 dependencies = [
-  "numpy",
+  "numpy"
 ]
 
 classifiers = [
@@ -24,6 +24,7 @@ classifiers = [
   "Intended Audience :: Developers",
   "Intended Audience :: End Users/Desktop",
   "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
   "Natural Language :: English",
   "Operating System :: OS Independent",
   "Programming Language :: Python :: 3 :: Only",
@@ -41,6 +42,9 @@ test = ["pytest", "pytest-cov"]
 "Bug Tracker" = "https://github.com/openmc-dev/openmc_mcnp_adapter/issues"
 Discussions = "https://openmc.discourse.org"
 "Source Code" = "https://github.com/openmc-dev/openmc_mcnp_adapter"
+
+[tool.poetry]
+packages = [{include = "openmc_mcnp_adapter", from = "src"}]
 
 [project.scripts]
 mcnp_to_openmc = "openmc_mcnp_adapter.openmc_conversion:mcnp_to_openmc"
